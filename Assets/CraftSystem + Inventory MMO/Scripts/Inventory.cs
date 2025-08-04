@@ -10,11 +10,7 @@ public class InventorySlot
 	public bool IsEmpty => Item == null || Quantity <= 0;
 	public bool IsFull => Item != null && Quantity >= Item.MaxStack;
 
-	public void Clear()
-	{
-		Item = null;
-		Quantity = 0;
-	}
+	public void Clear() { Item = null; Quantity = 0; }
 
 	public int Add(ItemSO item, int amount)
 	{
@@ -58,23 +54,79 @@ public class Inventory : MonoBehaviour
 
 	private void Awake()
 	{
-		if (slots == null || slots.Count != size)
-		{
+		EnsureSlotsPreservingData();
+	}
+
+	private void OnValidate()
+	{
+		// Поддерживаем список в корректном состоянии при правках в инспекторе.
+		// Не вызывает OnChanged и не трогает непустые слоты.
+		EnsureSlotsPreservingData();
+	}
+
+	/// <summary>
+	/// Гарантирует, что список слотов соответствует size,
+	/// при этом НЕ затирает уже предзаполненные элементы.
+	/// </summary>
+	private void EnsureSlotsPreservingData()
+	{
+		if (slots == null)
 			slots = new List<InventorySlot>(size);
-			for (int i = 0; i < size; i++)
+
+		// 1) Если элементов меньше, чем size — дозаполнить новыми пустыми слотами.
+		for (int i = 0; i < size; i++)
+		{
+			if (i >= slots.Count)
+			{
 				slots.Add(new InventorySlot());
+			}
+			else if (slots[i] == null)
+			{
+				// На всякий случай, если в списке оказался null — заменим на новый слот.
+				slots[i] = new InventorySlot();
+			}
+		}
+
+		// 2) Если элементов больше, чем size — удаляем ТОЛЬКО пустые хвостовые.
+		//    Если в хвосте есть занятые, не трогаем их и подгоняем size вверх.
+		if (slots.Count > size)
+		{
+			bool cutStoppedByNonEmpty = false;
+
+			for (int i = slots.Count - 1; i >= size; i--)
+			{
+				if (slots[i] == null || slots[i].IsEmpty)
+				{
+					slots.RemoveAt(i);
+				}
+				else
+				{
+					// нашли непустой слот за пределом size — не удаляем его
+					cutStoppedByNonEmpty = true;
+				}
+			}
+
+			if (cutStoppedByNonEmpty && slots.Count > size)
+			{
+				// Есть непустые «лишние» слоты — расширим size, чтобы их не потерять.
+				size = slots.Count;
+			}
 		}
 	}
+
+	// ===== ваша логика добавления/удаления как была =====
 
 	public int Add(ItemSO item, int amount)
 	{
 		if (item == null || amount <= 0) return 0;
 		int remaining = amount;
 
+		// Доливаем в существующие стаки
 		for (int i = 0; i < slots.Count && remaining > 0; i++)
 			if (slots[i].CanStack(item))
 				remaining -= slots[i].Add(item, remaining);
 
+		// Кладём в пустые слоты
 		for (int i = 0; i < slots.Count && remaining > 0; i++)
 			if (slots[i].IsEmpty)
 				remaining -= slots[i].Add(item, remaining);
@@ -116,8 +168,11 @@ public class Inventory : MonoBehaviour
 		for (int i = 0; i < slots.Count; i++)
 		{
 			var s = slots[i];
+			if (s == null) continue;
+
 			if (s.IsEmpty) free += item.MaxStack;
 			else if (s.Item == item) free += (item.MaxStack - s.Quantity);
+
 			if (free >= amount) return true;
 		}
 		return false;

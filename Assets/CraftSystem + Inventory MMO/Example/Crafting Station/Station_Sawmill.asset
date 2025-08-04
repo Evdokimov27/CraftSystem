@@ -10,7 +10,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 5ba0b29ba560b6b4e83888e2f4bb0591, type: 3}
-  m_Name: New Crafting Station
+  m_Name: Station_Sawmill
   m_EditorClassIdentifier: 
   Recipes:
   - {fileID: 11400000, guid: 6392ec9c151b2e34e864b2c6b358e402, type: 2}
+  - {fileID: 11400000, guid: 1e9a773e9757c7c44ab2e9f03e901d65, type: 2}

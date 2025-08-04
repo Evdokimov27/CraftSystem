@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 [System.Serializable]
@@ -6,25 +6,27 @@ public class CraftingInputSlot
 {
 	public ItemSO Item;
 	public int Quantity;
-
 	public bool IsEmpty => Item == null || Quantity <= 0;
 	public void Clear() { Item = null; Quantity = 0; }
 }
 
 public class CraftingStation : MonoBehaviour
 {
-	[Header("Setup")]
-	public StationSO Station;              // <-- ����� � ���������
-	[SerializeField, Min(1)] private int inputSlotsCount = 4;
-	[SerializeField] private List<CraftingInputSlot> inputSlots;
+	[Header("Данные рецептов")]
+	public StationSO StationData;                 // книга рецептов (ассет)
 
-	[SerializeField] private Inventory outputInventory;
+	[Header("Куда класть результат")]
+	public Inventory OutputInventory;
 
-	[Header("Rules")]
-	public bool StrictMatch = true;        // ������ �������� ���������
-	public bool RestrictSlotsToKnown = true; // � ����� ����� ������ ������ �������� �� ����� �������� �������
+	[Header("Правила")]
+	public bool RestrictSlotsToKnown = true;      // в слоты можно класть только ингредиенты рецептов этой станции
+	public bool StrictMatch = true;               // лишние предметы запрещены при совпадении рецепта
 
-	[Header("State (readonly)")]
+	[Header("UI слоты (назначьте вручную, ПО ПОРЯДКУ СЛЕВА НАПРАВО)")]
+	public List<StationSlotUI> SlotUIs = new();   // ← перетащите сюда свои UI-слоты
+
+	// Состояние
+	[SerializeField] private List<CraftingInputSlot> inputSlots = new(); // столько же, сколько SlotUIs
 	[SerializeField] private RecipeSO currentMatch;
 	[SerializeField] private int maxCraftsAvailable;
 
@@ -36,51 +38,68 @@ public class CraftingStation : MonoBehaviour
 	public ItemSO OutputItem => currentMatch ? currentMatch.Result : null;
 	public int OutputPerCraft => currentMatch ? currentMatch.ResultAmount : 0;
 
-	void Awake()
+	// ===== Жизненный цикл / привязка UI слотов =====
+	private void OnValidate() { SyncSlotsFromUI(); }
+	private void Awake() { SyncSlotsFromUI(); Recalculate(); }
+
+	private void SyncSlotsFromUI()
 	{
-		if (inputSlots == null || inputSlots.Count != inputSlotsCount)
+		// 1) подгоняем количество логических слотов под количество UI-слотов
+		int n = Mathf.Max(1, SlotUIs?.Count ?? 0);
+		if (inputSlots == null) inputSlots = new List<CraftingInputSlot>(n);
+		while (inputSlots.Count < n) inputSlots.Add(new CraftingInputSlot());
+		while (inputSlots.Count > n) inputSlots.RemoveAt(inputSlots.Count - 1);
+
+		// 2) жёстко биндим каждый UI-слот к этой станции и индексу
+		if (SlotUIs != null)
 		{
-			inputSlots = new List<CraftingInputSlot>(inputSlotsCount);
-			for (int i = 0; i < inputSlotsCount; i++) inputSlots.Add(new CraftingInputSlot());
+			for (int i = 0; i < SlotUIs.Count; i++)
+			{
+				var ui = SlotUIs[i];
+				if (!ui) continue;
+				ui.Bind(this, i);                     // ← единственное место, где задаются station+index
+			}
 		}
-		Recalculate();
+
+		// 3) дернуть UI на случай правок в редакторе
+		OnChanged?.Invoke();
 	}
 
-	// === ��������� API ��� UI ===
-
+	// ===== API для UI-слотов =====
 	public bool CanAccept(ItemSO item)
 	{
-		if (!RestrictSlotsToKnown || item == null || Station == null) return true;
-		if (Station.Recipes == null) return false;
+		if (item == null) return false;
+		if (!RestrictSlotsToKnown || !StationData) return true;
 
-		foreach (var r in Station.Recipes)
-			if (r != null)
-				for (int i = 0; i < r.Ingredients.Count; i++)
-					if (r.Ingredients[i].Item == item) return true;
-
+		foreach (var r in StationData.Recipes)
+		{
+			if (!r) continue;
+			for (int i = 0; i < r.Ingredients.Count; i++)
+				if (r.Ingredients[i].Item == item) return true;
+		}
 		return false;
 	}
 
-	// �������� � ���������� ���� (���������� ������� ���������� ���-��)
 	public int AddToSlot(int index, ItemSO item, int amount)
 	{
 		if (!InRange(index) || item == null || amount <= 0) return 0;
 		if (!CanAccept(item)) return 0;
 
 		var s = inputSlots[index];
-
 		if (s.IsEmpty)
 		{
 			s.Item = item;
 			s.Quantity = amount;
-			Recalculate();
-			return amount;
+		}
+		else if (s.Item == item)
+		{
+			s.Quantity += amount;
+		}
+		else
+		{
+			return 0; // в слоте другой предмет
 		}
 
-		if (s.Item != item)
-			return 0;
-
-		s.Quantity += amount;
 		Recalculate();
 		return amount;
 	}
@@ -90,75 +109,49 @@ public class CraftingStation : MonoBehaviour
 		if (!InRange(index) || amount <= 0) return 0;
 		var s = inputSlots[index];
 		if (s.IsEmpty) return 0;
+
 		int rem = Mathf.Min(amount, s.Quantity);
 		s.Quantity -= rem;
 		if (s.Quantity <= 0) s.Clear();
+
 		Recalculate();
 		return rem;
 	}
 
-	public void ClearAll()
+	public int ReturnInputsToInventory()
 	{
-		foreach (var s in inputSlots) s.Clear();
-		Recalculate();
-	}
+		if (OutputInventory == null || Inputs == null) return 0;
 
-	
-	public int AutoFillFromInventory(Inventory inv, RecipeSO recipe, int crafts = 1)
-	{
-		if (inv == null || recipe == null || crafts <= 0) return 0;
-		int moved = 0;
-
-		foreach (var ing in recipe.Ingredients)
+		int totalReturned = 0;
+		// Проходим по ВСЕМ слотам и пытаемся вернуть содержимое
+		for (int i = 0; i < inputSlots.Count; i++)
 		{
-			int need = ing.Amount * crafts;
+			var s = inputSlots[i];
+			if (s.IsEmpty) continue;
 
-			// ������� ��� ����� (�� ���� ������)
-			int haveHere = 0;
-			for (int i = 0; i < inputSlots.Count; i++)
-				if (!inputSlots[i].IsEmpty && inputSlots[i].Item == ing.Item)
-					haveHere += inputSlots[i].Quantity;
-
-			int toTake = Mathf.Max(0, need - haveHere);
-			if (toTake <= 0) continue;
-
-			int taken = inv.Remove(ing.Item, toTake); 
-			if (taken <= 0) continue;
-
-			for (int i = 0; i < inputSlots.Count && taken > 0; i++)
-				if (!inputSlots[i].IsEmpty && inputSlots[i].Item == ing.Item)
-				{
-					inputSlots[i].Quantity += taken;
-					moved += taken;
-					taken = 0;
-				}
-
-			for (int i = 0; i < inputSlots.Count && taken > 0; i++)
-				if (inputSlots[i].IsEmpty || inputSlots[i].Item == ing.Item)
-				{
-					if (!CanAccept(ing.Item)) break;
-					if (inputSlots[i].IsEmpty) inputSlots[i].Item = ing.Item;
-					inputSlots[i].Quantity += taken;
-					moved += taken;
-					taken = 0;
-				}
+			int want = s.Quantity;
+			// inv.Add вернёт сколько реально поместилось (может быть частично)
+			int added = OutputInventory.Add(s.Item, want);
+			if (added > 0)
+			{
+				// снимаем из слота ровно столько, сколько удалось вернуть
+				RemoveFromSlotInternal(i, added);
+				totalReturned += added;
+			}
 		}
 
-		if (moved > 0) Recalculate();
-		return moved;
+		Recalculate(); // обновит UI
+		return totalReturned;
 	}
-
 	public int TryCraft(int crafts = 1)
 	{
 		crafts = Mathf.Clamp(crafts, 1, maxCraftsAvailable);
-		if (currentMatch == null || crafts <= 0) return 0;
+		if (!currentMatch || crafts <= 0) return 0;
 
 		int totalOut = currentMatch.ResultAmount * crafts;
-
-		if (outputInventory && !outputInventory.HasSpaceFor(currentMatch.Result, totalOut))
+		if (OutputInventory && !OutputInventory.HasSpaceFor(currentMatch.Result, totalOut))
 			return 0;
 
-		// ��������� �����������
 		foreach (var ing in currentMatch.Ingredients)
 		{
 			int need = ing.Amount * crafts;
@@ -167,7 +160,7 @@ public class CraftingStation : MonoBehaviour
 					need -= RemoveFromSlotInternal(i, need);
 		}
 
-		if (outputInventory) outputInventory.Add(currentMatch.Result, totalOut);
+		if (OutputInventory) OutputInventory.Add(currentMatch.Result, totalOut);
 
 		Recalculate();
 		return crafts;
@@ -175,7 +168,8 @@ public class CraftingStation : MonoBehaviour
 
 	public int TryCraftAll() => TryCraft(maxCraftsAvailable);
 
-	// === ���������� ===
+	// ===== Внутреннее =====
+	private bool InRange(int i) => i >= 0 && i < inputSlots.Count;
 
 	private int RemoveFromSlotInternal(int index, int amount)
 	{
@@ -186,61 +180,54 @@ public class CraftingStation : MonoBehaviour
 		return rem;
 	}
 
-	private bool InRange(int i) => i >= 0 && i < inputSlots.Count;
-
 	private void Recalculate()
 	{
 		currentMatch = null;
 		maxCraftsAvailable = 0;
 
-		var inputCounts = new Dictionary<ItemSO, int>();
+		var counts = new Dictionary<ItemSO, int>();
 		foreach (var s in inputSlots)
 		{
 			if (s.IsEmpty) continue;
-			if (!inputCounts.TryGetValue(s.Item, out int c)) c = 0;
-			inputCounts[s.Item] = c + s.Quantity;
+			counts.TryGetValue(s.Item, out int c);
+			counts[s.Item] = c + s.Quantity;
 		}
 
-		if (Station == null || Station.Recipes == null || Station.Recipes.Count == 0 || inputCounts.Count == 0)
+		if (!StationData || StationData.Recipes == null || StationData.Recipes.Count == 0 || counts.Count == 0)
 		{
-			OnChanged?.Invoke();
+			OnChanged?.Invoke();   // чтобы UI обнулился
 			return;
 		}
 
-		foreach (var recipe in Station.Recipes)
+		foreach (var r in StationData.Recipes)
 		{
-			if (recipe == null || recipe.Result == null || recipe.Ingredients == null || recipe.Ingredients.Count == 0)
-				continue;
+			if (!r || !r.Result || r.Ingredients == null || r.Ingredients.Count == 0) continue;
 
 			if (StrictMatch)
 			{
-				foreach (var pair in inputCounts)
+				foreach (var pair in counts)
 				{
 					bool present = false;
-					foreach (var ing in recipe.Ingredients)
-						if (ing.Item == pair.Key) { present = true; break; }
-					if (!present) goto NextRecipe;
+					for (int i = 0; i < r.Ingredients.Count; i++)
+						if (r.Ingredients[i].Item == pair.Key) { present = true; break; }
+					if (!present) goto Next;
 				}
 			}
 
 			int crafts = int.MaxValue;
-			foreach (var ing in recipe.Ingredients)
+			for (int i = 0; i < r.Ingredients.Count; i++)
 			{
-				inputCounts.TryGetValue(ing.Item, out int have);
+				var ing = r.Ingredients[i];
+				counts.TryGetValue(ing.Item, out int have);
 				if (have < ing.Amount) { crafts = 0; break; }
 				crafts = Mathf.Min(crafts, have / ing.Amount);
 			}
 
-			if (crafts > 0)
-			{
-				currentMatch = recipe;
-				maxCraftsAvailable = crafts;
-				break;
-			}
+			if (crafts > 0) { currentMatch = r; maxCraftsAvailable = crafts; break; }
 
-		NextRecipe:;
+		Next:;
 		}
 
-		OnChanged?.Invoke();
+		OnChanged?.Invoke(); // ← оповещаем все SlotUI
 	}
 }
